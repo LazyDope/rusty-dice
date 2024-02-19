@@ -1,0 +1,16 @@
+%%
+[0-9]+ "INTEGER"
+"," "COMMA"
+\+ "ADD"
+\- "SUB"
+\* "MUL"
+\/ "DIV"
+\/\/ "INTDIV"
+\% "MOD"
+d "DICE"
+((k|p|rr|ro|ra|mi|ma|e)(|l|h|\<|\>)[0-9]+)* "POSTFIXOPS"
+\( "LPAR"
+\) "RPAR"
+\[ "LBRACE"
+\] "RBRACE"
+[\t\n ]+ ;
