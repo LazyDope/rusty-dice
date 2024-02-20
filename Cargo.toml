@@ -9,6 +9,7 @@ edition = "2021"
 cfgrammar = "0.13.4"
 lrlex = "0.13.4"
 lrpar = "0.13.4"
+rand = "0.8.5"
 thiserror = "1.0.57"
 
 [build-dependencies]

@@ -1,6 +1,6 @@
 %%
 [0-9]+ "INTEGER"
-"," "COMMA"
+, "COMMA"
 \+ "ADD"
 \- "SUB"
 \* "MUL"
@@ -8,7 +8,7 @@
 \/\/ "INTDIV"
 \% "MOD"
 d "DICE"
-((k|p|rr|ro|ra|mi|ma|e)(|l|h|\<|\>)[0-9]+)* "POSTFIXOPS"
+((k|p|rr|ro|mi|ma|e)(|l|h|\<|\>)[0-9]+)+ "POSTFIXOPS"
 \( "LPAR"
 \) "RPAR"
 \[ "LBRACE"

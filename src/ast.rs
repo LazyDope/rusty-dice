@@ -1,4 +1,4 @@
-use std::{num::ParseIntError, str::FromStr, sync::Arc};
+use std::{fmt::Display, iter::Peekable, num::ParseIntError, str::FromStr, sync::Arc};
 
 use thiserror::Error;
 
@@ -11,12 +11,12 @@ lrpar_mod!("dice.y");
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum ASTNode {
     BinOp {
-        lhs: Box<ASTNode>,
-        rhs: Box<ASTNode>,
+        lhs: Arc<ASTNode>,
+        rhs: Arc<ASTNode>,
         op: BinOp,
     },
     UnOp {
-        val: Box<ASTNode>,
+        expr: Arc<ASTNode>,
         op: UnOp,
     },
     Dice {
@@ -28,12 +28,12 @@ pub enum ASTNode {
         val: u64,
     },
     Group {
-        items: Vec<ASTNode>,
+        items: Vec<Arc<ASTNode>>,
         modifiers: Modifiers,
     },
 }
 
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug, Copy)]
 pub enum BinOp {
     Add,
     Sub,
@@ -43,42 +43,62 @@ pub enum BinOp {
     Mod,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug, Copy)]
 pub enum UnOp {
     // Pos variant exists so that the original dice can be recreated
     Pos,
     Neg,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug, Default)]
 pub struct Modifiers {
     inner: Vec<Modifier>,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
-pub struct Modifier {
-    mod_type: ModifierType,
-    selector: Selector,
+pub enum Modifier {
+    MinMax {
+        mod_type: MinMaxModifier,
+        val: u64,
+    },
+    Conditional {
+        mod_type: ConditionalModifier,
+        selector: Selector,
+    },
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
-pub enum ModifierType {
+pub enum MinMaxModifier {
+    Min,
+    Max,
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub enum ConditionalModifier {
     Keep,
     Drop,
     Explode,
     Reroll,
     RerollOnce,
-    Maximum,
-    Minimum,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum Selector {
+    Ordered(OrderedSelector),
+    Unordered(UnorderedSelector),
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub enum OrderedSelector {
+    Lowest(usize),
+    Highest(usize),
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub enum UnorderedSelector {
     Equal(u64),
     LessThan(u64),
     GreaterThan(u64),
-    Lowest(usize),
-    Highest(usize),
 }
 
 #[derive(Error, Debug)]
@@ -88,43 +108,101 @@ pub enum ParseError {
     #[error("int parse error: `{0}`")]
     ParseIntError(#[from] ParseIntError),
     #[error("invalid modifier: `{0}`")]
-    ModifierTypeError(Arc<str>),
+    ModifierError(Arc<str>),
     #[error("invalid selector: `{0}`")]
     SelectorError(Arc<str>),
 }
 
-impl ModifierType {
-    fn from_chars(chars: &mut impl Iterator<Item = char>) -> Result<Option<Self>, ParseError> {
-        Ok(Some(match chars.next() {
-            Some('k') => ModifierType::Keep,
-            Some('p') => ModifierType::Drop,
-            Some('e') => ModifierType::Explode,
-            Some('r') => match chars.next() {
-                Some('r') => ModifierType::Reroll,
-                Some('o') => ModifierType::RerollOnce,
-                Some(c) => return Err(ParseError::ModifierTypeError(format!("r{}", c).into())),
-                None => return Err(ParseError::ModifierTypeError("r".into())),
-            },
-            Some('m') => match chars.next() {
-                Some('i') => ModifierType::Minimum,
-                Some('a') => ModifierType::Maximum,
-                Some(c) => return Err(ParseError::ModifierTypeError(format!("m{}", c).into())),
-                None => return Err(ParseError::ModifierTypeError("m".into())),
-            },
-            Some(c) => return Err(ParseError::ModifierTypeError(c.to_string().into())),
+impl Modifiers {
+    pub fn new() -> Modifiers {
+        Modifiers::default()
+    }
+}
+
+impl Modifier {
+    fn from_chars(
+        chars: &mut Peekable<impl Iterator<Item = char>>,
+    ) -> Result<Option<Self>, ParseError> {
+        Ok(match chars.next() {
+            Some('m') => {
+                let mod_type = MinMaxModifier::from_chars(chars)?;
+
+                Some(Self::MinMax {
+                    mod_type,
+                    val: collect_numbers(chars).parse()?,
+                })
+            }
+            Some(c) => {
+                let mod_type = ConditionalModifier::from_chars(c, chars)?;
+
+                let selector = Selector::from_chars(chars)?;
+
+                Some(Self::Conditional { mod_type, selector })
+            }
             None => return Ok(None),
-        }))
+        })
+    }
+}
+
+fn collect_numbers(chars: &mut Peekable<impl Iterator<Item = char>>) -> String {
+    // A take_while here would allocate an empty string anyways,
+    // and this way we can avoid moving chars up to the end later
+    let mut numbers: String = String::new();
+    while let Some(num) = chars.next_if(|val| ('0'..='9').contains(val)) {
+        numbers.push(num)
+    }
+
+    numbers
+}
+
+impl MinMaxModifier {
+    fn from_chars(chars: &mut impl Iterator<Item = char>) -> Result<Self, ParseError> {
+        Ok(match chars.next() {
+            Some('i') => MinMaxModifier::Min,
+            Some('a') => MinMaxModifier::Max,
+            Some(c) => return Err(ParseError::ModifierError(format!("m{}", c).into())),
+            None => return Err(ParseError::ModifierError("m".into())),
+        })
+    }
+}
+
+impl ConditionalModifier {
+    fn from_chars(
+        initial: char,
+        chars: &mut impl Iterator<Item = char>,
+    ) -> Result<Self, ParseError> {
+        Ok(match initial {
+            'k' => ConditionalModifier::Keep,
+            'p' => ConditionalModifier::Drop,
+            'e' => ConditionalModifier::Explode,
+            'r' => match chars.next() {
+                Some('r') => ConditionalModifier::Reroll,
+                Some('o') => ConditionalModifier::RerollOnce,
+                Some(c) => return Err(ParseError::ModifierError(format!("r{}", c).into())),
+                None => return Err(ParseError::ModifierError("r".into())),
+            },
+            c => return Err(ParseError::ModifierError(c.to_string().into())),
+        })
     }
 }
 
 impl Selector {
-    fn from_char_and_nums(selector_char: char, numbers: &str) -> Result<Self, ParseError> {
+    fn from_chars(chars: &mut Peekable<impl Iterator<Item = char>>) -> Result<Self, ParseError> {
+        use OrderedSelector::*;
+        use Selector::*;
+        use UnorderedSelector::*;
+        let selector_char = chars
+            .next()
+            .ok_or_else(|| ParseError::SelectorError("".into()))?;
+
+        let numbers = collect_numbers(chars);
+
         Ok(match selector_char {
-            '<' => Selector::LessThan(numbers.parse()?),
-            '>' => Selector::GreaterThan(numbers.parse()?),
-            'h' => Selector::Highest(numbers.parse()?),
-            'l' => Selector::Lowest(numbers.parse()?),
-            '0'..='9' => Selector::Equal(format!("{}{}", selector_char, numbers).parse()?),
+            '<' => Unordered(LessThan(numbers.parse()?)),
+            '>' => Unordered(GreaterThan(numbers.parse()?)),
+            'h' => Ordered(Highest(numbers.parse()?)),
+            'l' => Ordered(Lowest(numbers.parse()?)),
+            '0'..='9' => Unordered(Equal(format!("{}{}", selector_char, numbers).parse()?)),
             _ => return Err(ParseError::SelectorError(selector_char.to_string().into())),
         })
     }
@@ -136,23 +214,70 @@ impl FromStr for Modifiers {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut mods = vec![];
         let mut chars = s.chars().peekable();
-        while let Some(mod_type) = ModifierType::from_chars(&mut chars)? {
-            let selector_char = chars
-                .next()
-                .ok_or_else(|| ParseError::SelectorError("".into()))?;
-
-            // A take_while here would allocate an empty string anyways,
-            // and this way we can avoid moving chars up to the end later
-            let mut numbers: String = String::new();
-            while let Some(num) = chars.next_if(|val| ('0'..='9').contains(val)) {
-                numbers.push(num)
-            }
-
-            let selector = Selector::from_char_and_nums(selector_char, &numbers)?;
-
-            mods.push(Modifier { mod_type, selector })
+        while let Some(modifier) = Modifier::from_chars(&mut chars)? {
+            mods.push(modifier)
         }
         Ok(mods.into())
+    }
+}
+
+impl Display for Modifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Modifier::MinMax { mod_type, val } => write!(f, "{}{}", mod_type, val),
+            Modifier::Conditional { mod_type, selector } => write!(f, "{}{}", mod_type, selector),
+        }
+    }
+}
+
+impl Display for ConditionalModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                ConditionalModifier::Keep => "k",
+                ConditionalModifier::Drop => "p",
+                ConditionalModifier::Explode => "e",
+                ConditionalModifier::Reroll => "rr",
+                ConditionalModifier::RerollOnce => "ro",
+            }
+        )
+    }
+}
+
+impl Display for Selector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Selector::Ordered(sel) => match sel {
+                OrderedSelector::Lowest(val) => write!(f, "l{}", val),
+                OrderedSelector::Highest(val) => write!(f, "h{}", val),
+            },
+            Selector::Unordered(sel) => match sel {
+                UnorderedSelector::Equal(val) => write!(f, "{}", val),
+                UnorderedSelector::LessThan(val) => write!(f, "<{}", val),
+                UnorderedSelector::GreaterThan(val) => write!(f, ">{}", val),
+            },
+        }
+    }
+}
+
+impl Display for MinMaxModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                MinMaxModifier::Min => "mi",
+                MinMaxModifier::Max => "ma",
+            }
+        )
+    }
+}
+
+impl Modifiers {
+    pub fn inner(&self) -> &[Modifier] {
+        self.inner.as_slice()
     }
 }
 
@@ -166,11 +291,10 @@ impl From<Vec<Modifier>> for Modifiers {
 mod tests {
     use super::*;
 
-    #[test]
-    fn basic_dice_parse() {
+    fn parse(value: &str) -> Result<ASTNode, ParseError> {
         let lexerdef = dice_l::lexerdef();
-        let lex = lexerdef.lexer("4d6kh3e6mi1");
-        let result = match dice_y::parse(&lex) {
+        let lex = lexerdef.lexer(value);
+        Ok(match dice_y::parse(&lex) {
             (Some(Ok(result)), errs) => {
                 for e in errs {
                     eprintln!("{:?}", e);
@@ -180,22 +304,42 @@ mod tests {
             (res, errs) => {
                 panic!("{:?}: {:?}", res, errs);
             }
+        })
+    }
+
+    #[test]
+    fn test_basic_dice() {
+        let result = parse("1d8").unwrap();
+        let expected_result = ASTNode::Dice {
+            count: 1,
+            size: 8,
+            modifiers: vec![].into(),
         };
+        assert_eq!(result, expected_result);
+    }
+
+    #[test]
+    fn test_dice_modifiers() {
+        use OrderedSelector::*;
+        use Selector::*;
+        use UnorderedSelector::*;
+
+        let result = parse("4d6kh3e6mi1").unwrap();
         let expected_result = ASTNode::Dice {
             count: 4,
             size: 6,
             modifiers: vec![
-                Modifier {
-                    mod_type: ModifierType::Keep,
-                    selector: Selector::Highest(3),
+                Modifier::Conditional {
+                    mod_type: ConditionalModifier::Keep,
+                    selector: Ordered(Highest(3)),
                 },
-                Modifier {
-                    mod_type: ModifierType::Explode,
-                    selector: Selector::Equal(6),
+                Modifier::Conditional {
+                    mod_type: ConditionalModifier::Explode,
+                    selector: Unordered(Equal(6)),
                 },
-                Modifier {
-                    mod_type: ModifierType::Minimum,
-                    selector: Selector::Equal(1),
+                Modifier::MinMax {
+                    mod_type: MinMaxModifier::Min,
+                    val: 1,
                 },
             ]
             .into(),
@@ -205,25 +349,13 @@ mod tests {
 
     #[test]
     fn test_order_of_ops() {
-        let lexerdef = dice_l::lexerdef();
-        let lex = lexerdef.lexer("+-++1+2*3%4");
-        let result = match dice_y::parse(&lex) {
-            (Some(Ok(result)), errs) => {
-                for e in errs {
-                    eprintln!("{:?}", e);
-                }
-                result
-            }
-            (res, errs) => {
-                panic!("{:?}: {:?}", res, errs);
-            }
-        };
+        let result = parse("+-++1+2*3%4").unwrap();
         let expected_result = ASTNode::BinOp {
-            lhs: Box::new(ASTNode::UnOp {
-                val: Box::new(ASTNode::UnOp {
-                    val: Box::new(ASTNode::UnOp {
-                        val: Box::new(ASTNode::UnOp {
-                            val: Box::new(ASTNode::Literal { val: 1 }),
+            lhs: Arc::new(ASTNode::UnOp {
+                expr: Arc::new(ASTNode::UnOp {
+                    expr: Arc::new(ASTNode::UnOp {
+                        expr: Arc::new(ASTNode::UnOp {
+                            expr: Arc::new(ASTNode::Literal { val: 1 }),
                             op: UnOp::Pos,
                         }),
                         op: UnOp::Pos,
@@ -232,16 +364,38 @@ mod tests {
                 }),
                 op: UnOp::Pos,
             }),
-            rhs: Box::new(ASTNode::BinOp {
-                lhs: Box::new(ASTNode::BinOp {
-                    lhs: Box::new(ASTNode::Literal { val: 2 }),
-                    rhs: Box::new(ASTNode::Literal { val: 3 }),
+            rhs: Arc::new(ASTNode::BinOp {
+                lhs: Arc::new(ASTNode::BinOp {
+                    lhs: Arc::new(ASTNode::Literal { val: 2 }),
+                    rhs: Arc::new(ASTNode::Literal { val: 3 }),
                     op: BinOp::Mul,
                 }),
-                rhs: Box::new(ASTNode::Literal { val: 4 }),
+                rhs: Arc::new(ASTNode::Literal { val: 4 }),
                 op: BinOp::Mod,
             }),
             op: BinOp::Add,
+        };
+        assert_eq!(result, expected_result);
+    }
+
+    #[test]
+    fn test_grouped_dice() {
+        let result = parse("(1d8, 2d6, 5)").unwrap();
+        let expected_result = ASTNode::Group {
+            items: vec![
+                Arc::new(ASTNode::Dice {
+                    count: 1,
+                    size: 8,
+                    modifiers: Default::default(),
+                }),
+                Arc::new(ASTNode::Dice {
+                    count: 2,
+                    size: 6,
+                    modifiers: Default::default(),
+                }),
+                Arc::new(ASTNode::Literal { val: 5 }),
+            ],
+            modifiers: Default::default(),
         };
         assert_eq!(result, expected_result);
     }
